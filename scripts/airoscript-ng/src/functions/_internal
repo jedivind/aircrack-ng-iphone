@@ -1,0 +1,268 @@
+# Internal functions file for airoscript.
+# Recommends: wlandecrypter
+
+# Copyright (C) 2009-2011 David Francos Cuartero
+#        This program is free software; you can redistribute it and/or
+#        modify it under the terms of the GNU General Public License
+#        as published by the Free Software Foundation; either version 2
+#        of the License, or (at your option) any later version.
+
+#        This program is distributed in the hope that it will be useful,
+#        but WITHOUT ANY WARRANTY; without even the implied warranty of
+#        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#        GNU General Public License for more details.
+
+#        You should have received a copy of the GNU General Public License
+#        along with this program; if not, write to the Free Software
+#        Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+error(){
+    export ERRORS="$@";
+}
+
+reload_config(){
+#    _source "./airoscript-ng.conf.devel ~/.airoscript-ng/airoscript-ng.conf /etc/airoscript-ng.conf /usr/local/etc/airoscript-ng.conf"
+#    _source "./airoscript-ng_advanced.conf.devel ~/.airoscript-ng_advanced/airoscript-ng_advanced.conf /etc/airoscript-ng_advanced.conf /usr/local/etc/airoscript-ng_advanced.conf"
+return
+}
+
+cleanautovars(){
+    export AUTO=0; export QUIET=""; export INTERACTIVE=$OLDINTERACTIVE
+    return
+}
+
+configure(){
+    if [ -O $DUMP_PATH/$Host_MAC.key ] && [ "$Host_MAC" != "" ]; then
+        warn "${mark}Configuring network"
+        KEY="$(cat $DUMP_PATH/$Host_MAC.key)"
+        tag;warn "${mark}Got key: $KEY"
+        [[ "$Host_ENC" =~ (.*)WPA(.*) ]] && {
+            tag;warn "${mark}Configuring wpa_supplicant"
+            wpa_passphrase $Host_SSID "$KEY" > $DUMP_PATH/$Host_MAC.wpa_supplicant;
+            wpa_supplicant -i $wificard -B -c$DUMP_PATH/$Host_MAC.wpa_supplicant;
+            tag; warn "${mark}Launching $DHCPSOFT to $wificard"
+            $DHCPSOFT $wificard &>/dev/null || warn "${mark}Could not autoconfigure network"
+        } || {
+            tag; warn "${mark}Configuring network with iwconfig"
+            $iwconfig $wificard essid $Host_SSID channel $Host_CHAN key $KEY &>/dev/null && {
+            tag; warn "${mark}Launching $DHCPSOFT to $wificard"
+                $DHCPSOFT $wificard &>/dev/null || warn  "${mark}Could not autoconfigure network" && return 2
+            } || { warn "${mark}Could not autoconfigure network, wrong password size?"; }
+        }
+    else
+        warn "You haven't cracked this network yet"; sleep 3; $clear
+    fi
+}
+
+
+usage(){
+    cat << eof
+Usage: $(basename $0) [-h] [-t TERMINAL] [-v] [-w WIRELESS_CARD] [-b] [-m fakemac|realmac] [-a] [-n FILTER] [-x] [-z] [-p PLUGIN_FILE]
+
+options:
+   -h                    Show this message
+   -t [xterm|screen]     Specify terminal
+   -c                    Launches an interface selection menu (requires -pzenity)
+   -v                    Verbose & debug mode
+   -w wireless_card      Specify wifi card
+   -b                    Writes a csv file with network data.
+   -m [fakemac|realmac]  Change mac to fakemac before everything else.
+   -a                    Automatic mode
+   -n [regex]            Filter SSID by regex
+   -x                    Autoconfigure network after automatic crack (requires -a)
+   -z                    Don't scan automatically at start
+   -p [plugin file]      Load plugin at start
+
+eof
+}
+
+launch_help_fifo(){
+    mkfifo $DUMP_PATH/help_fifo
+    xterm -e "tail -f $DUMP_PATH/help_fifo"
+}
+
+help_fifo(){
+    clear > $DUMP_PATH/help_fifo
+    echo $@ > $DUMP_PATH/help_fifo
+}
+
+function choose_interface(){
+    zenity --question --ok-label "Graphical" --cancel-label "Text" --text "Wich interface would you like to use?" --title "Interface selection" && load_plugins zenity
+}
+
+setargs(){
+     while getopts “bn:ht:w:zxcvm:fap:” option; do
+        case $option in
+            c)  choose_interface ;;
+            h)  opt_functions+=(usage);;
+            t)  export TERMINAL="$OPTARG";;
+            v)  opt_functions+=(v);;
+            w)  export wificard="$OPTARG";;
+            b)  export report_mode=1;;
+            m)  opts_mac_opt="$OPTARG"; opt_functions+=(m);;
+            a)  opt_functions+=(auto);;
+            n)  export filter_ssid_="$OPTARG";;
+            x)  export options_autoconfigure=1;;
+            z)  export noscan=1;;
+            p)  load_plugins $OPTARG;;
+            ?)  opt_functions+=(usage);;
+        esac
+    done
+
+    for i in ${opt_functions[@]}; do [[ $i == "usage" ]] && { usage; exit 1; }; done # Small hack to execute usage the first 
+    for i in ${opt_functions[@]}; do [[ $i != auto ]] && options_$i || execute_auto=1; done
+    [[ $execute_auto ]] && options_auto; # Small hack to execute auto the lastest xD
+    [[ $TERMINAL == "screen" ]] && screen_startup ${@}
+}
+
+options_m(){ opts_change_$opts_mac_opt; }
+opts_change_fakemac(){ wichchangemac 1; opts_wireless; }
+opts_change_realmac(){ checkforcemac 3; opts_wireless; }
+
+options_v(){
+    export debug=1;
+    export hold=1;
+    _source "./airoscript-ng_debug.conf ~/airoscript-ng_debug.conf /etc/airoscript-ng_debug.conf /usr/local/etc/airoscript-ng_debug.conf"
+}
+
+opts_wireless(){
+    { guess_idata "start"; testmac; export iwifi=$wifi ; } &>/dev/null;
+    sleep 1; set_wifi_by_args=1
+}
+
+options_auto(){
+	export noscan=1;
+    temporary_switch_clear;
+    export clear="";
+	check_function autopwn || source $path/autocrack;
+	check_function doexit || source $path/internal/exit;
+    autopwn runner
+    doexit;
+}
+
+load_plugins(){
+    for i in ${@}; do 
+        if [[ -e $path/plugins/$i ]]; then
+            _source "${path}/plugins/${i}"
+        fi
+    done
+}
+
+initial_warning(){
+	warn -en $mark;
+    _ "  Airoscript is provided under the gpl.
+I'm not responsible of the use anyone can give to airoscript.
+Written for educational purpose in mind.
+"
+sleep $warn_time
+}
+
+# Standard functions.
+
+
+_debug(){
+    if [ "$debug" == 1 ]; then echo -en $mark; _ $1; fi
+}
+
+execute(){ 
+    check_function mkmenu || source $path/interface
+    check_function save_pids || source $path/internal/childs
+    title=$1; shift;
+
+    if [  "$ADDOPTIONS" != "" ]; then
+        printf -- "Executing $@"
+        echo
+        read -p "Enter extra options to execute: " eopts
+    fi
+    if [ $TERMINAL == "screen" ]; then
+		$CDCMD screen -S airoscript -c $SCREENRC -D -RR -X screen -t $title
+		$CDCMD screen -S airoscript -c $SCREENRC -X at "*" eval "stuff \"${@} $eopts; exit\"\015" 
+    else
+        if [ "$1" == "crack" ]; then HOLDA="-hold"; shift; fi # FIXME This will work just on xterm.
+        if [ "$QUIET" != "" ] || [ "$AUTO" == "1" ]; then 
+            [[ $NOTITLE ]] || warn "${mark}$title"
+            if [[ $wait_for_execute ]]; then
+                ${@} $eopts &> /dev/null
+            else
+                ${@} $eopts &> /dev/null &
+            fi
+        else
+            [[ $wait_for_execute == 1 ]] && {
+                $CDCMD $TERMINAL $HOLDA $TITLEFLAG "$title" $TOPLEFTBIG $BGC $BACKGROUND_COLOR $FGC $DUMPING_COLOR $EXECFLAG "${@} $eopts"
+            } || {
+                $CDCMD $TERMINAL $HOLDA $TITLEFLAG "$title" $TOPLEFTBIG $BGC $BACKGROUND_COLOR $FGC $DUMPING_COLOR $EXECFLAG "${@} $eopts" &
+            }
+        fi
+    fi 
+    save_pids $!
+}
+
+monmode(){ { ifconfig $1 up; $iwconfig $1 |grep "Monitor" && if [ $? != 0 ]; then MON_PREFIX=$mon_prefix $AIRMON start $1 $2; fi; } &>/dev/null ; }
+
+# this function allows debugging, called from main menu.
+function debug {
+	if [ "$debug" == "1" ] || [ "$hold" == "1"  ]; then
+		export HOLD=$HOLDFLAG; _ "Debug Mode enabled, you'll have to manually close windows"
+	else export HOLD="" ;fi
+}
+
+_read(){
+    # Read function so we can override it later, to add another interface.
+    read "${@}"; 
+}
+
+# Various checks.
+checkdir(){
+    if [ -d $DUMP_PATH ]; then
+        if [ "$DEBUG" == 1 ]; then
+            _ "[INFO] Output folder is" " $DUMP_PATH";
+        fi
+    else
+        _ "[Error] Output folder does not exists or is a regular file."
+        exit
+    fi
+}
+
+check_function(){
+    declare -f $1 &>/dev/null
+    return $?
+}
+
+# Standard attacks functions.
+
+attack_wpa(){
+    check_function wpa_attacks || source $path/attacks/wpa
+    wpa_attacks menu
+}
+
+attack_wep(){
+    check_function wep_attacks || source $path/attacks/wep
+    wep_attacks menu
+}
+
+attack_opn(){ # If no encryption detected
+    if [ "$Host_SSID" = "" ]; then
+        $clear &&  echo  "`gettext 'ERROR: You have to select a target'`"
+    else
+        $clear && echo `gettext "ERROR: Network not encrypted or no network selected "`
+    fi
+}
+
+capture(){
+    hardclean
+    execute "Capturing" $AIRODUMP --ignore-negative-one --bssid $Host_MAC -w $DUMP_PATH/$Host_MAC -c $Host_CHAN -a $wifi 
+    echo
+}
+
+tag(){ echo -ne "\t"; }
+
+hardclean(){ rm -rf $DUMP_PATH/$Host_MAC*; }
+
+single_question(){ read -p "${@}" ans; }
+warn(){ echo "${@}"; }
+specialwarn(){ echo -e -n "${@}"; }
+yesno(){
+    read -p "${@} [Y|n]" -n1 -s a; echo
+    [[ $a =~ (.*)[N|n](.*) ]] && return 1 || return 0
+}
+_source $path/internal/startup
